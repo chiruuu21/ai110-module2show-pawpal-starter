@@ -709,3 +709,148 @@ class TestConflictWarnings:
         mochi.add_task(meds)
         mochi.complete_task(meds.id, FRIDAY)
         assert scheduler.detect_conflicts(owner.all_tasks(), FRIDAY) == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: sorting correctness, recurrence logic, conflict detection
+# ---------------------------------------------------------------------------
+
+
+class TestSortingCorrectness:
+    def test_empty_list_sorts_to_empty(self, scheduler):
+        assert scheduler.sort_by_time([]) == []
+
+    def test_sort_returns_a_new_list_and_leaves_input_alone(self, scheduler):
+        tasks = [
+            CareTask("Dinner", 10, fixed_time=time(18, 0)),
+            CareTask("Breakfast", 10, fixed_time=time(7, 0)),
+        ]
+        original = list(tasks)
+        scheduler.sort_by_time(tasks)
+        assert tasks == original
+
+    def test_equal_times_keep_insertion_order(self, scheduler):
+        tasks = [
+            CareTask("Meds", 5, fixed_time=time(9, 0)),
+            CareTask("Breakfast", 10, fixed_time=time(9, 0)),
+            CareTask("Early walk", 20, fixed_time=time(7, 0)),
+        ]
+        ordered = [task.title for task in scheduler.sort_by_time(tasks)]
+        assert ordered == ["Early walk", "Meds", "Breakfast"]
+
+    def test_plan_entries_are_chronological_and_never_overlap(self, scheduler):
+        tasks = [
+            CareTask("Dinner", 15, fixed_time=time(17, 0)),
+            CareTask("Brush", 20, priority=Priority.LOW),
+            CareTask("Meds", 5, fixed_time=time(9, 0)),
+            CareTask("Walk", 45, priority=Priority.HIGH),
+            CareTask("Lunch", 10, fixed_time=time(12, 0)),
+        ]
+        plan = scheduler.build_plan(tasks, constraints())
+        starts = [entry.start for entry in plan.entries]
+        assert starts == sorted(starts)
+        for earlier, later in zip(plan.entries, plan.entries[1:]):
+            assert earlier.end <= later.start
+        assert len(plan.entries) == 5
+
+    def test_overnight_window_puts_after_midnight_task_last(self, scheduler):
+        plan = scheduler.build_plan(
+            [
+                CareTask("Late meds", 10, fixed_time=time(1, 0)),
+                CareTask("Night walk", 20, fixed_time=time(23, 0)),
+            ],
+            constraints(day_start=time(22, 0), available_minutes=240),
+        )
+        assert titles(plan) == ["Night walk", "Late meds"]
+        assert plan.entries[1].start.date() == SATURDAY
+
+
+class TestRecurrenceLogic:
+    @pytest.fixture
+    def pet(self):
+        return Pet("Mochi", "dog")
+
+    def test_follower_copies_the_task_details(self, pet):
+        walk = CareTask(
+            "Walk", 30,
+            priority=Priority.HIGH,
+            category=TaskCategory.WALK,
+            fixed_time=time(7, 30),
+        )
+        pet.add_task(walk)
+        follower = pet.complete_task(walk.id, FRIDAY)
+        assert (follower.title, follower.duration_minutes) == ("Walk", 30)
+        assert follower.priority is Priority.HIGH
+        assert follower.category is TaskCategory.WALK
+        assert follower.fixed_time == time(7, 30)
+        assert follower.recurrence == walk.recurrence
+
+    def test_follower_is_due_tomorrow_but_not_today(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        follower = pet.complete_task(walk.id, FRIDAY)
+        assert not follower.is_due_on(FRIDAY)
+        assert follower.is_due_on(SATURDAY)
+        assert not walk.is_due_on(SATURDAY)
+
+    def test_completing_on_consecutive_days_builds_a_chain(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        saturday = pet.complete_task(walk.id, FRIDAY)
+        sunday = pet.complete_task(saturday.id, SATURDAY)
+        assert sunday.starts_on == date(2026, 10, 11)
+        assert sunday.follows_id == saturday.id
+        assert pet.active_tasks(date(2026, 10, 11)) == [sunday]
+        assert len(pet.tasks) == 3
+
+    def test_follower_cannot_be_completed_before_it_starts(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        follower = pet.complete_task(walk.id, FRIDAY)
+        assert pet.complete_task(follower.id, FRIDAY) is None
+        assert len(pet.tasks) == 2
+
+
+class TestDuplicateTimeConflicts:
+    def test_three_tasks_at_one_time_report_every_pair(self, scheduler):
+        tasks = [
+            CareTask("Meds", 5, fixed_time=time(9, 0)),
+            CareTask("Breakfast", 10, fixed_time=time(9, 0)),
+            CareTask("Walk", 30, fixed_time=time(9, 0)),
+        ]
+        warnings = scheduler.detect_conflicts(tasks, FRIDAY)
+        assert len(warnings) == 3
+        assert all(warning.startswith("Same time") for warning in warnings)
+
+    def test_duplicate_start_is_same_time_even_with_different_lengths(self, scheduler):
+        tasks = [
+            CareTask("Meds", 5, fixed_time=time(9, 0)),
+            CareTask("Walk", 60, fixed_time=time(9, 0)),
+        ]
+        [warning] = scheduler.detect_conflicts(tasks, FRIDAY)
+        assert "both start at 09:00" in warning
+
+    def test_partial_overlap_is_labelled_overlap_not_same_time(self, scheduler):
+        tasks = [
+            CareTask("Walk", 30, fixed_time=time(9, 0)),
+            CareTask("Meds", 5, fixed_time=time(9, 10)),
+        ]
+        [warning] = scheduler.detect_conflicts(tasks, FRIDAY)
+        assert warning.startswith("Overlap, same pet")
+        assert "09:00-09:30" in warning
+
+    def test_flexible_tasks_never_conflict(self, scheduler):
+        tasks = [CareTask("Brush", 10), CareTask("Play", 10)]
+        assert scheduler.detect_conflicts(tasks, FRIDAY) == []
+
+    def test_build_plan_keeps_one_duplicate_and_defers_the_other(self, scheduler):
+        plan = scheduler.build_plan(
+            [
+                CareTask("Breakfast", 10, priority=Priority.LOW, fixed_time=time(9, 0)),
+                CareTask("Meds", 5, priority=Priority.HIGH, fixed_time=time(9, 0)),
+            ],
+            constraints(),
+        )
+        assert titles(plan) == ["Meds"]
+        assert reasons(plan) == {"Breakfast": SkipReason.TIME_CONFLICT}
+        assert len(plan.warnings) == 1

@@ -56,19 +56,45 @@ Paste a sample of your app's CLI or Streamlit output here so a reader can see wh
 
 ## 🧪 Testing PawPal+
 
+Run the full test suite from the project root:
+
 ```bash
-# Run the full test suite:
-pytest
-
-# Run with coverage:
-pytest --cov
+python -m pytest
 ```
 
-Sample test output:
+### What the tests cover
+
+`test_pawpal.py` has 100 tests for the scheduling engine in `pawpal_system.py`. They call the classes directly, so no Streamlit session is needed.
+
+- **Sorting:** `sort_by_time` returns fixed-time tasks in clock order with flexible tasks last, keeps tasks that share a time in insertion order, and leaves the input list unchanged. Finished plans come out in order of start time with no overlapping entries, including a window that runs past midnight. Placement follows priority, then the preferred category order, then shorter duration.
+- **Recurrence:** daily, weekly and one-off rules are due on the right days. Completing a daily task creates a new instance that starts the next day, copies the task's details and links back to the original. Each day sees exactly one live instance. Completing twice doesn't create two copies, and reopening a task undoes the rollover.
+- **Conflict detection:** tasks that start at the same time are flagged as "Same time", partial overlaps as "Overlap", and each warning says whether it's the same pet or different pets. Back-to-back tasks and flexible tasks are never flagged. `build_plan` keeps the higher-priority task and defers the other as `TIME_CONFLICT`.
+- **Time budget and placement:** a zero-minute day, a task longer than the whole day, fixed times outside the window, the required gap between a meal and a walk, and tasks repeated more than once a day. A task that isn't placed always appears in the plan's deferred list with a reason.
+- **Validation and filtering:** invalid tasks and day settings are rejected, and `Owner.filter_tasks` filters by pet name and per-day completion status.
+
+### Sample test output
 
 ```
-# Paste your pytest output here
+============================= test session starts ==============================
+platform darwin -- Python 3.12.2, pytest-7.4.4, pluggy-1.0.0
+rootdir: /Users/chiragdhungana/Documents/8th_Semester/ai110-module2show-pawpal-starter
+plugins: anyio-4.6.2
+collected 100 items
+
+test_pawpal.py ......................................................... [ 57%]
+...........................................                              [100%]
+
+============================= 100 passed in 0.12s ==============================
 ```
+
+### Confidence level
+
+**★★★★☆ (4/5)**
+
+All 100 tests pass, and they cover the main behaviors and their edge cases. That includes the bugs that would quietly produce a wrong plan: duplicate rollovers, tasks missing without a reason, and overlapping placements. It isn't 5 stars for two reasons:
+
+- `detect_conflicts` and `sort_by_time` assume the day doesn't cross midnight. `build_plan` handles overnight windows correctly, so a clash after midnight can still be resolved in the plan without a warning being shown.
+- The Streamlit UI in `app.py` isn't covered by automated tests. It has only been checked by hand.
 
 ## 📐 Smarter Scheduling
 
