@@ -13,6 +13,8 @@
 - Did your design change during implementation?
 - If yes, describe at least one change and why you made it.
 
+Yes. My first skeleton tracked completion with a single `is_completed` boolean and placed tasks by advancing one clock cursor from the start of the day, and both broke once I worked through real cases. The boolean meant that marking today's walk as done removed it from every future plan, so I replaced it with a `completed_on` set of dates and an `is_done_on(day)` check, which lets a daily task be finished today and still be due tomorrow. The cursor was the bigger problem: because tasks with a fixed time were sorted first, anchoring medication at 18:00 pushed the cursor to 18:20 and every flexible task landed after it, leaving the whole morning empty. I switched to a free interval model where fixed tasks are anchored first and split the day into gaps, and the flexible tasks are then fitted into whatever gaps remain. I also moved from `time` to `datetime` internally after discovering that a `time` object cannot be added to a `timedelta` at all, and that 23:30 compares as less than 00:30, which silently defeated my overlap check for anything running past midnight. What I took from this is that writing the edge cases into the docstrings before implementing anything surfaced these flaws while they were still cheap to fix.
+
 ---
 
 ## 2. Scheduling Logic and Tradeoffs

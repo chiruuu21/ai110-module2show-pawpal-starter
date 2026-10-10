@@ -1,18 +1,21 @@
-
 classDiagram
     %% PawPal+ system design
     %% Data layer: Owner -> Pet -> CareTask
     %% Service layer: Scheduler consumes tasks + constraints, produces a DailyPlan
     %% Result layer: DailyPlan holds what was scheduled AND what was deferred (with reasons)
+    %% Time model: the scheduler works in minutes from day_start; DayConstraints
+    %% converts to datetime at the boundary so a plan can cross midnight.
 
     direction LR
 
     class Owner {
         +str name
-        +dict preferences
         +List~Pet~ pets
+        +List~TaskCategory~ preferred_order
         +add_pet(pet) None
         +all_tasks() List~CareTask~
+        +find_pet(pet_id) Pet
+        +pet_name_for(task) str
     }
 
     class Pet {
@@ -33,16 +36,21 @@ classDiagram
         +Priority priority
         +time fixed_time
         +Recurrence recurrence
-        +bool is_completed
+        +Set~date~ completed_on
+        +str pet_id
         +validate() None
         +is_due_on(day) bool
-        +mark_complete() None
+        +is_done_on(day) bool
+        +mark_complete(day) None
     }
 
     class Recurrence {
         +Frequency frequency
         +List~int~ weekdays
+        +date due_date
+        +int times_per_day
         +is_due_on(day) bool
+        +describe() str
     }
 
     class DayConstraints {
@@ -51,31 +59,46 @@ classDiagram
         +int available_minutes
         +int min_gap_after_meal
         +validate() None
-        +window_end() time
+        +start_datetime() datetime
+        +end_datetime() datetime
+        +to_datetime(offset_minutes) datetime
+        +offset_of(clock) int
     }
 
     class Scheduler {
-        +build_plan(tasks, constraints) DailyPlan
+        +build_plan(tasks, constraints, preferred_order) DailyPlan
         -_due_today(tasks, day) List~CareTask~
-        -_sort(tasks) List~CareTask~
-        -_place(task, cursor, constraints) ScheduledTask
+        -_expand(tasks) List~CareTask~
+        -_sort(tasks, preferred_order) List~CareTask~
+        -_anchor_fixed(tasks, constraints) tuple
+        -_free_intervals(placed, constraints) List~tuple~
+        -_fit(task, free, placed, constraints) ScheduledTask
+        -_last_meal_before(placed, offset_minutes, start_of_day) ScheduledTask
+        -_offset(moment, start_of_day) int
+        -_place(task, offset_minutes, constraints) ScheduledTask
+        -_required_gap(task, previous, constraints) int
         -_has_conflict(candidate, placed) bool
     }
 
     class DailyPlan {
         +date day
+        +DayConstraints constraints
         +List~ScheduledTask~ entries
         +List~DeferredTask~ deferred
         +int minutes_used
+        +int minutes_available
+        +int minutes_free
         +explain() str
         +to_rows() List~dict~
+        +deferred_rows() List~dict~
     }
 
     class ScheduledTask {
         +CareTask task
-        +time start
-        +time end
+        +datetime start
+        +datetime end
         +str reason
+        +int duration_minutes
     }
 
     class DeferredTask {
@@ -115,11 +138,14 @@ classDiagram
         NOT_DUE_TODAY
         EXCEEDS_DAY_BUDGET
         TIME_CONFLICT
+        OUTSIDE_WINDOW
         ALREADY_COMPLETED
     }
 
     Owner "1" *-- "0..*" Pet : owns
+    Owner ..> TaskCategory : prefers
     Pet "1" *-- "0..*" CareTask : needs
+    CareTask "0..*" --> "1" Pet : belongs to (pet_id)
     CareTask "1" o-- "1" Recurrence : repeats by
     CareTask ..> Priority : uses
     CareTask ..> TaskCategory : uses
@@ -129,6 +155,7 @@ classDiagram
     Scheduler ..> DayConstraints : reads
     Scheduler ..> DailyPlan : creates
 
+    DailyPlan "1" --> "1" DayConstraints : built under
     DailyPlan "1" *-- "0..*" ScheduledTask : contains
     DailyPlan "1" *-- "0..*" DeferredTask : contains
     ScheduledTask "1" --> "1" CareTask : references
