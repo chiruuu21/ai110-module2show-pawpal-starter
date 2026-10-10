@@ -61,6 +61,7 @@ owner: Owner = st.session_state.owner
 
 
 def find_task(task_id: str) -> tuple[Pet, CareTask] | tuple[None, None]:
+    """Return the pet and task with ``task_id``, or (None, None) if missing."""
     for pet in owner.pets:
         for task in pet.tasks:
             if task.id == task_id:
@@ -77,7 +78,7 @@ owner.name = st.sidebar.text_input("Owner name", value=owner.name)
 
 st.sidebar.header("Pets")
 for pet in owner.pets:
-    st.sidebar.write(f"**{pet.name}** ({pet.species}, {pet.age}) — {len(pet.tasks)} tasks")
+    st.sidebar.write(f"**{pet.name}** ({pet.species}, {pet.age}) — {len(pet.active_tasks(date.today()))} tasks")
 
 with st.sidebar.form("add_pet", clear_on_submit=True):
     st.caption("Add a pet")
@@ -124,9 +125,9 @@ with tasks_tab:
             st.subheader("Current tasks")
             for pet in owner.pets:
                 st.markdown(f"**{pet.name}**")
-                if not pet.tasks:
+                if not pet.active_tasks(plan_day):
                     st.caption("No tasks yet.")
-                for task in list(pet.tasks):
+                for task in pet.active_tasks(plan_day):
                     cols = st.columns([4, 2, 2, 1, 1])
                     when = f"{task.fixed_time:%H:%M}" if task.fixed_time else "flexible"
                     cols[0].write(task.title)
@@ -140,9 +141,9 @@ with tasks_tab:
                         help="Mark done today" if not done else "Undo",
                     ):
                         if done:
-                            task.completed_on.discard(plan_day)
+                            pet.reopen_task(task.id, plan_day)
                         else:
-                            task.mark_complete(plan_day)
+                            pet.complete_task(task.id, plan_day)
                         st.rerun()
                     if cols[4].button("✕", key=f"del_{task.id}", help="Delete"):
                         pet.remove_task(task.id)
@@ -150,7 +151,9 @@ with tasks_tab:
 
         with right:
             st.subheader("Add or edit a task")
-            all_tasks = [(pet, task) for pet in owner.pets for task in pet.tasks]
+            all_tasks = [
+                (pet, task) for pet in owner.pets for task in pet.active_tasks(plan_day)
+            ]
             options = ["(new task)"] + [f"{p.name}: {t.title}" for p, t in all_tasks]
             choice = st.selectbox("Task", options, key="task_choice")
 
@@ -264,7 +267,9 @@ with plan_tab:
         available_minutes=int(hours_available * 60),
         min_gap_after_meal=int(meal_gap),
     )
-    plan = Scheduler().build_plan(owner.all_tasks(), constraints, owner.preferred_order)
+    plan = Scheduler().build_plan(
+        owner.all_tasks(), constraints, owner.preferred_order, owner.pet_name_for
+    )
 
     st.subheader(f"Plan for {plan.day:%A %d %B %Y}")
     window = (
@@ -275,6 +280,8 @@ with plan_tab:
     available.metric("Minutes available", plan.minutes_available)
     free.metric("Minutes free", plan.minutes_free)
     st.caption(f"Window {window}")
+    for warning in plan.warnings:
+        st.warning(f"Conflict: {warning}")
 
     rows = plan.to_rows()
     for row, entry in zip(rows, plan.entries):

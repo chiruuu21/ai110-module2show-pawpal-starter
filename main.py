@@ -6,7 +6,7 @@ is the quickest way to check the engine end to end without Streamlit:
     python main.py
 """
 
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from pawpal_system import (
     CareTask,
@@ -32,17 +32,23 @@ def build_household(today: date) -> Owner:
     )
 
     mochi = Pet(name="Mochi", species="dog", age=4)
+    # Added out of clock order on purpose, so sort_by_time has work to do.
     mochi.add_task(
-        CareTask("Breakfast", 10, Priority.HIGH, TaskCategory.FEEDING,
-                 fixed_time=time(7, 0))
+        CareTask("Evening walk", 30, Priority.MEDIUM, TaskCategory.WALK,
+                 fixed_time=time(17, 30))
     )
     mochi.add_task(
         CareTask("Morning walk", 30, Priority.HIGH, TaskCategory.WALK,
                  fixed_time=time(8, 30))
     )
     mochi.add_task(
-        CareTask("Evening walk", 30, Priority.MEDIUM, TaskCategory.WALK,
-                 fixed_time=time(17, 30))
+        CareTask("Breakfast", 10, Priority.HIGH, TaskCategory.FEEDING,
+                 fixed_time=time(7, 0))
+    )
+    # Same pet, same start time as Breakfast: conflict detection should warn.
+    mochi.add_task(
+        CareTask("Ear drops", 5, Priority.HIGH, TaskCategory.MEDS,
+                 fixed_time=time(7, 0))
     )
     # Deliberately set to a different weekday so the deferral is always visible.
     mochi.add_task(
@@ -58,6 +64,17 @@ def build_household(today: date) -> Owner:
     )
     biscuit.add_task(
         CareTask("Litter box", 10, Priority.MEDIUM, TaskCategory.OTHER)
+    )
+    # Deliberately overlaps Mochi's 08:30 walk so conflict detection has
+    # something to report.
+    biscuit.add_task(
+        CareTask("Vet phone call", 20, Priority.MEDIUM, TaskCategory.OTHER,
+                 fixed_time=time(8, 45))
+    )
+    # Different pet, same start time as Mochi's evening walk.
+    biscuit.add_task(
+        CareTask("Dinner", 10, Priority.HIGH, TaskCategory.FEEDING,
+                 fixed_time=time(17, 30))
     )
     biscuit.add_task(
         CareTask("Play session", 15, Priority.LOW, TaskCategory.ENRICHMENT,
@@ -105,7 +122,73 @@ def print_left_out(owner: Owner, plan) -> None:
         print(f"  {row['task']:<22}{pet:<10}{row['reason']}{detail}")
 
 
+def print_task_list(owner: Owner, tasks) -> None:
+    """One line per task: clock time (or flex), title, pet."""
+    for task in tasks:
+        clock = f"{task.fixed_time:%H:%M}" if task.fixed_time else "flex"
+        print(f"  {clock:<7}{task.title:<22}{owner.pet_name_for(task)}")
+
+
+def print_smart_views(owner: Owner, scheduler: Scheduler, today: date) -> None:
+    """Sorting, filtering, recurrence and conflict checks, before planning."""
+    print("CONFLICT CHECK")
+    print(THIN)
+    warnings = scheduler.detect_conflicts(owner.all_tasks(), today, owner.pet_name_for)
+    for warning in warnings:
+        print(f"  WARNING: {warning}")
+    if not warnings:
+        print("  No fixed time conflicts.")
+
+    print()
+    print("ALL TASKS AS ADDED")
+    print(THIN)
+    print_task_list(owner, owner.all_tasks())
+
+    print()
+    print("ALL TASKS BY TIME")
+    print(THIN)
+    print_task_list(owner, scheduler.sort_by_time(owner.all_tasks()))
+
+    print()
+    print("FILTER: Biscuit's tasks")
+    print(THIN)
+    print_task_list(owner, owner.filter_tasks(pet_name="Biscuit"))
+
+    # Complete two recurring tasks to show the next occurrence and status filter.
+    print()
+    print("RECURRING: marking tasks complete")
+    print(THIN)
+    biscuit = next(pet for pet in owner.pets if pet.name == "Biscuit")
+    for task in owner.filter_tasks(pet_name="Biscuit"):
+        if task.title in ("Litter box", "Thyroid meds"):
+            follower = biscuit.complete_task(task.id, today)
+            if follower is None:
+                print(f"  {task.title:<22}done today, no repeat (one off)")
+            else:
+                print(
+                    f"  {task.title:<22}done today [{task.id}], new instance "
+                    f"[{follower.id}] starts {follower.starts_on:%a %d %b}"
+                )
+    print(f"  Biscuit now holds {len(biscuit.tasks)} task records, "
+          f"{len(biscuit.active_tasks(today))} live today, "
+          f"{len(biscuit.active_tasks(today + timedelta(days=1)))} live tomorrow")
+
+    print()
+    print("FILTER: completed today")
+    print(THIN)
+    print_task_list(owner, owner.filter_tasks(completed=True, day=today))
+
+    print()
+    print("FILTER: still pending today, by time")
+    print(THIN)
+    print_task_list(
+        owner, scheduler.sort_by_time(owner.filter_tasks(completed=False, day=today))
+    )
+    print()
+
+
 def main() -> None:
+    """Build the demo household, run every smart view, then plan today."""
     today = date.today()
     owner = build_household(today)
 
@@ -116,9 +199,7 @@ def main() -> None:
         min_gap_after_meal=60,
     )
 
-    plan = Scheduler().build_plan(
-        owner.all_tasks(), constraints, owner.preferred_order
-    )
+    scheduler = Scheduler()
 
     print(LINE)
     print(f" PawPal+ : daily plan for {owner.name}")
@@ -133,6 +214,10 @@ def main() -> None:
     print(f"Tasks:  {len(owner.all_tasks())} across {len(owner.pets)} pets")
     print()
 
+    print_smart_views(owner, scheduler, today)
+    plan = scheduler.build_plan(
+        owner.all_tasks(), constraints, owner.preferred_order, owner.pet_name_for
+    )
     print_schedule(owner, plan)
     print_left_out(owner, plan)
 

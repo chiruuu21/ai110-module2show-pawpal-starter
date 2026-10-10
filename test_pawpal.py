@@ -452,3 +452,260 @@ class TestPlanOutput:
             [CareTask("Huge", 999)], constraints(available_minutes=60)
         )
         assert plan.deferred_rows()[0]["reason"] == SkipReason.EXCEEDS_DAY_BUDGET.value
+
+
+# ---------------------------------------------------------------------------
+# Smarter scheduling: sorting, filtering, recurrence, conflicts
+# ---------------------------------------------------------------------------
+
+
+class TestSortByTime:
+    def test_fixed_tasks_come_out_in_clock_order(self, scheduler):
+        tasks = [
+            CareTask("Dinner", 10, fixed_time=time(18, 0)),
+            CareTask("Breakfast", 10, fixed_time=time(7, 0)),
+            CareTask("Lunch", 10, fixed_time=time(12, 0)),
+        ]
+        ordered = [task.title for task in scheduler.sort_by_time(tasks)]
+        assert ordered == ["Breakfast", "Lunch", "Dinner"]
+
+    def test_flexible_tasks_go_last_in_original_order(self, scheduler):
+        tasks = [
+            CareTask("Brush", 10),
+            CareTask("Meds", 5, fixed_time=time(9, 0)),
+            CareTask("Play", 10),
+        ]
+        ordered = [task.title for task in scheduler.sort_by_time(tasks)]
+        assert ordered == ["Meds", "Brush", "Play"]
+
+
+class TestFilterTasks:
+    @pytest.fixture
+    def owner(self):
+        owner = Owner(name="Jordan")
+        mochi, biscuit = Pet("Mochi", "dog"), Pet("Biscuit", "cat")
+        mochi.add_task(CareTask("Walk", 30))
+        biscuit.add_task(CareTask("Litter", 10))
+        biscuit.add_task(CareTask("Brush", 10))
+        owner.add_pet(mochi)
+        owner.add_pet(biscuit)
+        return owner
+
+    def test_filter_by_pet_name_ignores_case(self, owner):
+        assert [t.title for t in owner.filter_tasks(pet_name="biscuit")] == [
+            "Litter",
+            "Brush",
+        ]
+
+    def test_filter_by_status_is_judged_per_day(self, owner):
+        owner.filter_tasks(pet_name="Mochi")[0].mark_complete(FRIDAY)
+        assert [t.title for t in owner.filter_tasks(completed=True, day=FRIDAY)] == ["Walk"]
+        assert owner.filter_tasks(completed=True, day=SATURDAY) == []
+
+    def test_filters_combine(self, owner):
+        owner.filter_tasks(pet_name="Biscuit")[0].mark_complete(FRIDAY)
+        pending = owner.filter_tasks(pet_name="Biscuit", completed=False, day=FRIDAY)
+        assert [t.title for t in pending] == ["Brush"]
+
+    def test_unknown_pet_returns_nothing(self, owner):
+        assert owner.filter_tasks(pet_name="Rex") == []
+
+
+class TestNextOccurrence:
+    def test_completing_a_daily_task_returns_tomorrow(self):
+        task = CareTask("Walk", 30)
+        assert task.mark_complete(FRIDAY) == SATURDAY
+        assert task.is_due_on(SATURDAY)
+
+    def test_weekly_steps_to_the_next_listed_weekday(self):
+        rule = Recurrence(Frequency.WEEKLY, weekdays=[0, 4])  # Mon, Fri
+        assert rule.next_occurrence(FRIDAY) == MONDAY
+
+    def test_weekly_on_one_day_is_a_full_week_later(self):
+        rule = Recurrence(Frequency.WEEKLY, weekdays=[FRIDAY.weekday()])
+        assert rule.next_occurrence(FRIDAY) == date(2026, 10, 16)
+
+    def test_once_has_no_next_occurrence(self):
+        task = CareTask("Vet", 60, recurrence=Recurrence(Frequency.ONCE, due_date=FRIDAY))
+        assert task.mark_complete(FRIDAY) is None
+
+    def test_weekly_without_weekdays_has_no_next_occurrence(self):
+        assert Recurrence(Frequency.WEEKLY).next_occurrence(FRIDAY) is None
+
+
+class TestDetectConflicts:
+    def test_overlap_across_pets_is_reported_with_names(self, scheduler):
+        owner = Owner(name="Jordan")
+        mochi, biscuit = Pet("Mochi", "dog"), Pet("Biscuit", "cat")
+        mochi.add_task(CareTask("Walk", 30, fixed_time=time(8, 30)))
+        biscuit.add_task(CareTask("Vet call", 20, fixed_time=time(8, 45)))
+        owner.add_pet(mochi)
+        owner.add_pet(biscuit)
+        warnings = scheduler.detect_conflicts(owner.all_tasks(), FRIDAY, owner.pet_name_for)
+        assert len(warnings) == 1
+        assert "Walk (Mochi)" in warnings[0] and "Vet call (Biscuit)" in warnings[0]
+
+    def test_back_to_back_is_not_a_conflict(self, scheduler):
+        tasks = [
+            CareTask("A", 30, fixed_time=time(9, 0)),
+            CareTask("B", 30, fixed_time=time(9, 30)),
+        ]
+        assert scheduler.detect_conflicts(tasks, FRIDAY) == []
+
+    def test_one_long_task_overlapping_two_reports_both(self, scheduler):
+        tasks = [
+            CareTask("Long", 120, fixed_time=time(9, 0)),
+            CareTask("B", 10, fixed_time=time(9, 30)),
+            CareTask("C", 10, fixed_time=time(10, 30)),
+        ]
+        assert len(scheduler.detect_conflicts(tasks, FRIDAY)) == 2
+
+    def test_tasks_not_due_that_day_are_ignored(self, scheduler):
+        tasks = [
+            CareTask("A", 30, fixed_time=time(9, 0)),
+            CareTask(
+                "B", 30, fixed_time=time(9, 0),
+                recurrence=Recurrence(Frequency.WEEKLY, weekdays=[MONDAY.weekday()]),
+            ),
+        ]
+        assert scheduler.detect_conflicts(tasks, FRIDAY) == []
+
+    def test_fixed_task_repeated_per_day_is_flagged(self, scheduler):
+        task = CareTask(
+            "Feed", 10, fixed_time=time(8, 0),
+            recurrence=Recurrence(times_per_day=2),
+        )
+        assert "repeats 2 times" in scheduler.detect_conflicts([task], FRIDAY)[0]
+
+    def test_plan_deferral_names_the_blocking_task(self, scheduler):
+        plan = scheduler.build_plan(
+            [
+                CareTask("Meds A", 30, fixed_time=time(9, 0)),
+                CareTask("Meds B", 30, fixed_time=time(9, 15)),
+            ],
+            constraints(),
+        )
+        assert "Meds A" in plan.deferred[0].detail
+
+
+class TestRecurringRollover:
+    @pytest.fixture
+    def pet(self):
+        return Pet("Mochi", "dog")
+
+    def test_completing_a_daily_task_creates_tomorrows_instance(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        follower = pet.complete_task(walk.id, FRIDAY)
+        assert follower is not None and follower.id != walk.id
+        assert follower.starts_on == SATURDAY
+        assert follower.follows_id == walk.id
+        assert follower.pet_id == pet.id
+        assert follower.completed_on == set()
+
+    def test_each_day_sees_exactly_one_live_instance(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        follower = pet.complete_task(walk.id, FRIDAY)
+        assert pet.active_tasks(FRIDAY) == [walk]
+        assert pet.active_tasks(SATURDAY) == [follower]
+
+    def test_weekly_instance_waits_for_its_weekday(self, pet):
+        trim = CareTask(
+            "Trim", 20, recurrence=Recurrence(Frequency.WEEKLY, weekdays=[FRIDAY.weekday()])
+        )
+        pet.add_task(trim)
+        follower = pet.complete_task(trim.id, FRIDAY)
+        assert not follower.is_due_on(SATURDAY)
+        assert follower.is_due_on(date(2026, 10, 16))
+
+    def test_once_task_does_not_roll_over(self, pet):
+        vet = CareTask("Vet", 60, recurrence=Recurrence(Frequency.ONCE, due_date=FRIDAY))
+        pet.add_task(vet)
+        assert pet.complete_task(vet.id, FRIDAY) is None
+        assert len(pet.tasks) == 1 and vet.is_done_on(FRIDAY)
+
+    def test_completing_twice_does_not_spawn_two_copies(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        pet.complete_task(walk.id, FRIDAY)
+        assert pet.complete_task(walk.id, FRIDAY) is None
+        assert len(pet.tasks) == 2
+
+    def test_reopen_removes_the_rollover(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        pet.complete_task(walk.id, FRIDAY)
+        assert pet.reopen_task(walk.id, FRIDAY)
+        assert pet.tasks == [walk]
+        assert walk.ends_on is None and not walk.is_done_on(FRIDAY)
+
+    def test_reopen_keeps_a_follower_that_has_its_own_history(self, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        saturday = pet.complete_task(walk.id, FRIDAY)
+        pet.complete_task(saturday.id, SATURDAY)
+        pet.reopen_task(walk.id, FRIDAY)
+        assert saturday in pet.tasks and walk.ends_on == FRIDAY
+
+    def test_plan_tomorrow_schedules_the_new_instance_once(self, scheduler, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        pet.complete_task(walk.id, FRIDAY)
+        plan = scheduler.build_plan(pet.tasks, constraints(day=SATURDAY))
+        assert titles(plan) == ["Walk"]
+        assert plan.deferred == []
+
+    def test_plan_today_reports_the_completed_instance_only(self, scheduler, pet):
+        walk = CareTask("Walk", 30)
+        pet.add_task(walk)
+        pet.complete_task(walk.id, FRIDAY)
+        plan = scheduler.build_plan(pet.tasks, constraints())
+        assert plan.entries == []
+        assert reasons(plan) == {"Walk": SkipReason.ALREADY_COMPLETED}
+
+
+class TestConflictWarnings:
+    @pytest.fixture
+    def owner(self):
+        owner = Owner(name="Jordan")
+        owner.add_pet(Pet("Mochi", "dog"))
+        owner.add_pet(Pet("Biscuit", "cat"))
+        return owner
+
+    def test_same_time_same_pet_is_labelled(self, scheduler, owner):
+        mochi = owner.pets[0]
+        mochi.add_task(CareTask("Breakfast", 10, fixed_time=time(7, 0)))
+        mochi.add_task(CareTask("Ear drops", 5, fixed_time=time(7, 0)))
+        [warning] = scheduler.detect_conflicts(owner.all_tasks(), FRIDAY, owner.pet_name_for)
+        assert warning.startswith("Same time, same pet")
+        assert "both start at 07:00" in warning
+
+    def test_same_time_different_pets_is_labelled(self, scheduler, owner):
+        owner.pets[0].add_task(CareTask("Walk", 30, fixed_time=time(17, 30)))
+        owner.pets[1].add_task(CareTask("Dinner", 10, fixed_time=time(17, 30)))
+        [warning] = scheduler.detect_conflicts(owner.all_tasks(), FRIDAY, owner.pet_name_for)
+        assert warning.startswith("Same time, different pets")
+
+    def test_build_plan_records_warnings_and_still_plans(self, scheduler, owner):
+        owner.pets[0].add_task(CareTask("Walk", 30, fixed_time=time(9, 0)))
+        owner.pets[1].add_task(CareTask("Dinner", 10, fixed_time=time(9, 0)))
+        plan = scheduler.build_plan(
+            owner.all_tasks(), constraints(), name_for=owner.pet_name_for
+        )
+        assert len(plan.warnings) == 1
+        assert len(plan.entries) == 1
+        assert "Warnings:" in plan.explain()
+
+    def test_no_conflicts_means_no_warnings_section(self, scheduler):
+        plan = scheduler.build_plan([CareTask("Walk", 30)], constraints())
+        assert plan.warnings == []
+        assert "Warnings:" not in plan.explain()
+
+    def test_completed_task_no_longer_conflicts(self, scheduler, owner):
+        mochi = owner.pets[0]
+        meds = CareTask("Meds", 5, fixed_time=time(7, 0))
+        mochi.add_task(CareTask("Breakfast", 10, fixed_time=time(7, 0)))
+        mochi.add_task(meds)
+        mochi.complete_task(meds.id, FRIDAY)
+        assert scheduler.detect_conflicts(owner.all_tasks(), FRIDAY) == []
