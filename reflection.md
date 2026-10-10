@@ -5,6 +5,7 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
+  My UML design consists of 4 major objects: owner, pet, tasks, and scheduler. 
 - What classes did you include, and what responsibilities did you assign to each?
 
 **b. Design changes**

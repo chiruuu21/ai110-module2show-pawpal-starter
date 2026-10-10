@@ -1,15 +1,136 @@
+
 classDiagram
-    %% Replace the placeholders below with your actual classes, attributes, methods, and relationships.
-    %% Keep this file updated so it matches your final implementation.
+    %% PawPal+ system design
+    %% Data layer: Owner -> Pet -> CareTask
+    %% Service layer: Scheduler consumes tasks + constraints, produces a DailyPlan
+    %% Result layer: DailyPlan holds what was scheduled AND what was deferred (with reasons)
 
-    class ClassName {
-        +type attribute
-        +method() returnType
+    direction LR
+
+    class Owner {
+        +str name
+        +dict preferences
+        +List~Pet~ pets
+        +add_pet(pet) None
+        +all_tasks() List~CareTask~
     }
 
-    class AnotherClass {
-        +type attribute
-        +method() returnType
+    class Pet {
+        +str id
+        +str name
+        +str species
+        +int age
+        +List~CareTask~ tasks
+        +add_task(task) None
+        +remove_task(task_id) bool
     }
 
-    ClassName --> AnotherClass : relationship
+    class CareTask {
+        +str id
+        +str title
+        +TaskCategory category
+        +int duration_minutes
+        +Priority priority
+        +time fixed_time
+        +Recurrence recurrence
+        +bool is_completed
+        +validate() None
+        +is_due_on(day) bool
+        +mark_complete() None
+    }
+
+    class Recurrence {
+        +Frequency frequency
+        +List~int~ weekdays
+        +is_due_on(day) bool
+    }
+
+    class DayConstraints {
+        +date day
+        +time day_start
+        +int available_minutes
+        +int min_gap_after_meal
+        +validate() None
+        +window_end() time
+    }
+
+    class Scheduler {
+        +build_plan(tasks, constraints) DailyPlan
+        -_due_today(tasks, day) List~CareTask~
+        -_sort(tasks) List~CareTask~
+        -_place(task, cursor, constraints) ScheduledTask
+        -_has_conflict(candidate, placed) bool
+    }
+
+    class DailyPlan {
+        +date day
+        +List~ScheduledTask~ entries
+        +List~DeferredTask~ deferred
+        +int minutes_used
+        +explain() str
+        +to_rows() List~dict~
+    }
+
+    class ScheduledTask {
+        +CareTask task
+        +time start
+        +time end
+        +str reason
+    }
+
+    class DeferredTask {
+        +CareTask task
+        +SkipReason reason
+        +str detail
+    }
+
+    class Priority {
+        <<enumeration>>
+        LOW
+        MEDIUM
+        HIGH
+        +int weight
+    }
+
+    class TaskCategory {
+        <<enumeration>>
+        WALK
+        FEEDING
+        MEDS
+        GROOMING
+        ENRICHMENT
+        OTHER
+    }
+
+    class Frequency {
+        <<enumeration>>
+        ONCE
+        DAILY
+        WEEKLY
+    }
+
+    class SkipReason {
+        <<enumeration>>
+        NO_TIME_LEFT
+        NOT_DUE_TODAY
+        EXCEEDS_DAY_BUDGET
+        TIME_CONFLICT
+        ALREADY_COMPLETED
+    }
+
+    Owner "1" *-- "0..*" Pet : owns
+    Pet "1" *-- "0..*" CareTask : needs
+    CareTask "1" o-- "1" Recurrence : repeats by
+    CareTask ..> Priority : uses
+    CareTask ..> TaskCategory : uses
+    Recurrence ..> Frequency : uses
+
+    Scheduler ..> CareTask : reads
+    Scheduler ..> DayConstraints : reads
+    Scheduler ..> DailyPlan : creates
+
+    DailyPlan "1" *-- "0..*" ScheduledTask : contains
+    DailyPlan "1" *-- "0..*" DeferredTask : contains
+    ScheduledTask "1" --> "1" CareTask : references
+    DeferredTask "1" --> "1" CareTask : references
+    DeferredTask ..> SkipReason : uses
