@@ -22,6 +22,22 @@ Your final app should:
 - Display the plan clearly (and ideally explain the reasoning)
 - Include tests for the most important scheduling behaviors
 
+## ✨ Features
+
+All scheduling logic lives in `pawpal_system.py`. The Streamlit app (`app.py`) and the terminal demo (`main.py`) only collect input and display results.
+
+- **Sorting by time:** `Scheduler.sort_by_time()` lists tasks in clock order. Fixed-time tasks come first, earliest to latest, and flexible tasks follow in the order they were added.
+- **Priority-based planning:** `build_plan` places tasks by priority (high first), then by the owner's preferred category order, then by shortest duration. The sort is stable, so the same input always gives the same plan.
+- **Fixed times first, then gap filling:** tasks with a fixed time are placed first and split the day into free gaps. Flexible tasks then go into the first gap long enough to hold them.
+- **Conflict warnings:** `Scheduler.detect_conflicts()` flags fixed-time tasks that start at the same time or overlap. Each warning says whether the clash is between tasks for the same pet or different pets. The app shows these as warnings and never crashes, and the plan keeps the higher-priority (or earlier) task.
+- **Daily and weekly recurrence:** marking a daily or weekly task done creates its next instance, starting the next day, with `Pet.complete_task()`. Today's copy stays marked done, and tomorrow's copy is pending. One-off tasks don't repeat. Completing a task can be undone.
+- **Repeats within a day:** a task with `times_per_day = 2` (for example, twice-daily play) is scheduled as two separate slots.
+- **Meal-to-walk spacing:** walks are kept a set number of minutes away from the end of any meal.
+- **Filtering:** `Owner.filter_tasks()` filters by pet name, by done or pending for a given day, or both.
+- **Time budget:** the plan never goes past the hours available. Fixed tasks that run outside the window, and tasks longer than the whole day, are caught.
+- **Explained plans:** every scheduled task says why it got its slot. Every task left out is listed with a reason (`TIME_CONFLICT`, `NO_TIME_LEFT`, `NOT_DUE_TODAY`, `ALREADY_COMPLETED`, …), so nothing disappears silently.
+- **Overnight windows:** a day that starts at 22:00 and runs past midnight is planned correctly.
+
 ## Getting started
 
 ### Setup
@@ -149,12 +165,76 @@ PawPal+ goes beyond a plain to-do list with four small algorithms. All of them l
 
 ## 📸 Demo Walkthrough
 
-Describe your app in numbered steps so a reader can follow along without watching a video:
+Run `streamlit run app.py`. The app opens with two sample pets, Mochi and Biscuit, so you can try it right away.
 
-1. <!-- Describe this step -->
-2. <!-- Describe this step -->
-3. <!-- Describe this step -->
-4. <!-- Describe this step -->
-5. <!-- Add more steps as needed -->
+### What you can do
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+- **Sidebar:** add pets, pick the day, and set the hours you have.
+- **Tasks tab:** add, edit, complete (✓), undo (↺) or delete (✕) tasks. You get a warning if a new task clashes with another one.
+- **Schedule view tab:** see the day's tasks sorted by time, filtered by pet or by done/pending.
+- **Daily plan tab:** see the generated plan, why each task was placed where it is, and what was left out.
+
+### Example workflow
+
+1. **Add a pet:** in the sidebar, add "Luna" the cat.
+2. **Add a task:** on the Tasks tab, give Luna a "Brush" task at 07:00. You'll see a warning, because Mochi's Breakfast is also at 07:00.
+3. **View the schedule:** open Schedule view to see every task in time order.
+4. **Check the plan:** open Daily plan. The higher-priority task gets the 07:00 slot, and the other is listed under "Left out" with the reason.
+5. **Complete a task:** click ✓ on "Litter box". It's marked done today and comes back tomorrow.
+
+### Scheduler behaviors on show
+
+- **Sorting:** tasks are listed by time, and flexible tasks go last.
+- **Conflict warnings:** tasks at the same or overlapping times are flagged instead of crashing the app.
+- **Daily recurrence:** completing a daily task creates tomorrow's copy.
+- **Explained plan:** every task left out comes with a reason.
+
+### Sample CLI output
+
+`python main.py` runs the same scheduler in the terminal (trimmed):
+
+```
+CONFLICT CHECK
+------------------------------------------------------------------------
+  WARNING: Same time, same pet: Breakfast (Mochi) and Ear drops (Mochi) both start at 07:00
+  WARNING: Overlap, different pets: Morning walk (Mochi) 08:30-09:00 runs into Vet phone call (Biscuit) 08:45-09:05
+  WARNING: Same time, different pets: Evening walk (Mochi) and Dinner (Biscuit) both start at 17:30
+
+ALL TASKS BY TIME
+------------------------------------------------------------------------
+  07:00  Breakfast             Mochi
+  07:00  Ear drops             Mochi
+  08:30  Morning walk          Mochi
+  08:45  Vet phone call        Biscuit
+  12:00  Thyroid meds          Biscuit
+  17:30  Evening walk          Mochi
+  17:30  Dinner                Biscuit
+  flex   Nail trim             Mochi
+  flex   Litter box            Biscuit
+  flex   Play session          Biscuit
+
+RECURRING: marking tasks complete
+------------------------------------------------------------------------
+  Thyroid meds          done today [261dffe8], new instance [ec680741] starts Sun 11 Oct
+  Litter box            done today [1d47aa6a], new instance [2b6d0db1] starts Sun 11 Oct
+
+TODAY'S SCHEDULE  Saturday 10 October 2026
+------------------------------------------------------------------------
+  TIME           TASK                  PET        MINS  PRIORITY
+  07:00 - 07:05  Ear drops             Mochi         5  high
+  07:05 - 07:20  Play session (1 of 2) Biscuit      15  low
+  07:20 - 07:35  Play session (2 of 2) Biscuit      15  low
+  08:30 - 09:00  Morning walk          Mochi        30  high
+  17:30 - 17:40  Dinner                Biscuit      10  high
+------------------------------------------------------------------------
+  Used 75 of 720 minutes, 645 free.
+
+LEFT OUT
+------------------------------------------------------------------------
+  Nail trim             Mochi     not scheduled for today (weekly on Mon)
+  Thyroid meds          Biscuit   already done today
+  Litter box            Biscuit   already done today
+  Breakfast             Mochi     overlaps a fixed time task (07:00 clashes with Ear drops at 07:00-07:05)
+  Vet phone call        Biscuit   overlaps a fixed time task (08:45 clashes with Morning walk at 08:30-09:00)
+  Evening walk          Mochi     overlaps a fixed time task (17:30 clashes with Dinner at 17:30-17:40)
+```

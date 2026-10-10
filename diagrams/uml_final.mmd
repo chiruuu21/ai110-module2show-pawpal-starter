@@ -1,0 +1,185 @@
+classDiagram
+    %% PawPal+ system design (final, matches pawpal_system.py)
+    %% Data layer: Owner -> Pet -> CareTask
+    %% Service layer: Scheduler consumes tasks + constraints, produces a DailyPlan
+    %% Result layer: DailyPlan holds what was scheduled, what was deferred (with
+    %% reasons), and conflict warnings.
+    %% Time model: the scheduler works in minutes from day_start; DayConstraints
+    %% converts to datetime at the boundary so a plan can cross midnight.
+    %% Recurrence model: completing a daily/weekly task closes the current
+    %% CareTask instance (ends_on) and Pet appends a follower instance that
+    %% starts the next day and points back through follows_id.
+    %% `Task` is an alias of CareTask in the code.
+
+    direction LR
+
+    class Owner {
+        +str name
+        +List~Pet~ pets
+        +List~TaskCategory~ preferred_order
+        +add_pet(pet) None
+        +all_tasks() List~CareTask~
+        +filter_tasks(pet_name, completed, day) List~CareTask~
+        +find_pet(pet_id) Pet
+        +pet_name_for(task) str
+    }
+
+    class Pet {
+        +str id
+        +str name
+        +str species
+        +int age
+        +List~CareTask~ tasks
+        +add_task(task) None
+        +remove_task(task_id) bool
+        +find_task(task_id) CareTask
+        +active_tasks(day) List~CareTask~
+        +complete_task(task_id, day) CareTask
+        +reopen_task(task_id, day) bool
+    }
+
+    class CareTask {
+        +str id
+        +str title
+        +int duration_minutes
+        +Priority priority
+        +TaskCategory category
+        +time fixed_time
+        +Recurrence recurrence
+        +Set~date~ completed_on
+        +str pet_id
+        +date starts_on
+        +date ends_on
+        +str follows_id
+        +validate() None
+        +is_done_on(day) bool
+        +is_active_on(day) bool
+        +is_due_on(day) bool
+        +next_instance(completed) CareTask
+        +mark_complete(day) date
+    }
+
+    class Recurrence {
+        +Frequency frequency
+        +List~int~ weekdays
+        +date due_date
+        +int times_per_day
+        +is_due_on(day) bool
+        +next_occurrence(after) date
+        +describe() str
+    }
+
+    class DayConstraints {
+        +date day
+        +time day_start
+        +int available_minutes
+        +int min_gap_after_meal
+        +validate() None
+        +start_datetime() datetime
+        +end_datetime() datetime
+        +to_datetime(offset_minutes) datetime
+        +offset_of(clock) int
+    }
+
+    class Scheduler {
+        +build_plan(tasks, constraints, preferred_order, name_for) DailyPlan
+        +sort_by_time(tasks) List~CareTask~
+        +detect_conflicts(tasks, day, name_for) List~str~
+        -_due_today(tasks, day) List~CareTask~
+        -_expand(tasks) List~CareTask~
+        -_sort(tasks, preferred_order) List~CareTask~
+        -_anchor_fixed(tasks, constraints) tuple
+        -_free_intervals(placed, constraints, task) List~tuple~
+        -_fit(task, free, constraints) ScheduledTask
+        -_offset(moment, start_of_day) int
+        -_place(task, offset_minutes, constraints) ScheduledTask
+        -_find_conflict(candidate, placed) ScheduledTask
+    }
+
+    class DailyPlan {
+        +date day
+        +DayConstraints constraints
+        +List~ScheduledTask~ entries
+        +List~DeferredTask~ deferred
+        +List~str~ warnings
+        +int minutes_used
+        +int minutes_available
+        +int minutes_free
+        +explain() str
+        +to_rows() List~dict~
+        +deferred_rows() List~dict~
+    }
+
+    class ScheduledTask {
+        +CareTask task
+        +datetime start
+        +datetime end
+        +str reason
+        +int duration_minutes
+    }
+
+    class DeferredTask {
+        +CareTask task
+        +SkipReason reason
+        +str detail
+    }
+
+    class Priority {
+        <<enumeration>>
+        LOW
+        MEDIUM
+        HIGH
+        +int weight
+    }
+
+    class TaskCategory {
+        <<enumeration>>
+        WALK
+        FEEDING
+        MEDS
+        GROOMING
+        ENRICHMENT
+        OTHER
+    }
+
+    class Frequency {
+        <<enumeration>>
+        ONCE
+        DAILY
+        WEEKLY
+    }
+
+    class SkipReason {
+        <<enumeration>>
+        NO_TIME_LEFT
+        NOT_DUE_TODAY
+        EXCEEDS_DAY_BUDGET
+        TIME_CONFLICT
+        OUTSIDE_WINDOW
+        ALREADY_COMPLETED
+    }
+
+    Owner "1" *-- "0..*" Pet : owns
+    Owner ..> TaskCategory : prefers
+    Pet "1" *-- "0..*" CareTask : needs
+    Pet ..> CareTask : complete_task() appends next instance
+    CareTask "0..*" --> "1" Pet : belongs to (pet_id)
+    CareTask "0..1" --> "0..1" CareTask : follows (follows_id)
+    CareTask "1" o-- "1" Recurrence : repeats by
+    CareTask ..> Priority : uses
+    CareTask ..> TaskCategory : uses
+    Recurrence ..> Frequency : uses
+
+    Scheduler ..> CareTask : reads, sorts
+    Scheduler ..> DayConstraints : reads
+    Scheduler ..> DailyPlan : creates
+    Scheduler ..> ScheduledTask : creates
+    Scheduler ..> DeferredTask : creates
+    Scheduler ..> Owner : name_for = Owner.pet_name_for
+
+    DailyPlan "1" --> "1" DayConstraints : built under
+    DailyPlan "1" *-- "0..*" ScheduledTask : contains
+    DailyPlan "1" *-- "0..*" DeferredTask : contains
+    ScheduledTask "1" --> "1" CareTask : references
+    DeferredTask "1" --> "1" CareTask : references
+    DeferredTask ..> SkipReason : uses

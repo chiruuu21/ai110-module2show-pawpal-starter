@@ -17,6 +17,7 @@ from pawpal_system import (
     Priority,
     Recurrence,
     Scheduler,
+    SkipReason,
     TaskCategory,
 )
 
@@ -113,7 +114,9 @@ owner.preferred_order = preferred_order
 st.title("🐾 PawPal+")
 st.caption("A daily care plan that explains itself.")
 
-tasks_tab, plan_tab = st.tabs(["Tasks", "Daily plan"])
+scheduler = Scheduler()
+
+tasks_tab, view_tab, plan_tab = st.tabs(["Tasks", "Schedule view", "Daily plan"])
 
 with tasks_tab:
     if not owner.pets:
@@ -122,6 +125,16 @@ with tasks_tab:
         left, right = st.columns([3, 2])
 
         with left:
+            # Shown here as well as in the other tabs, so a clash is visible
+            # where the task was added. The message set on save survives the
+            # st.rerun() that follows it by living in session state.
+            for kind, message in st.session_state.pop("flash", []):
+                getattr(st, kind)(message)
+            for warning in scheduler.detect_conflicts(
+                owner.all_tasks(), plan_day, owner.pet_name_for
+            ):
+                st.warning(f"⚠️ {warning}")
+
             st.subheader("Current tasks")
             for pet in owner.pets:
                 st.markdown(f"**{pet.name}**")
@@ -252,8 +265,88 @@ with tasks_tab:
                         task.completed_on = set(target.completed_on)
                         target_pet.remove_task(target.id)
                     destination.add_task(task)
-                    st.success(f"{'Updated' if editing else 'Added'} {task.title}.")
+                    label = f"{task.title} ({destination.name})"
+                    clashes = [
+                        warning
+                        for warning in scheduler.detect_conflicts(
+                            owner.all_tasks(), plan_day, owner.pet_name_for
+                        )
+                        if label in warning
+                    ]
+                    verb = "Updated" if editing else "Added"
+                    if clashes:
+                        st.session_state.flash = [
+                            (
+                                "error",
+                                f"{verb} {task.title}, but it clashes with another "
+                                "fixed-time task. The plan will keep only one of "
+                                "them; change a fixed time to fit both.",
+                            )
+                        ]
+                    else:
+                        st.session_state.flash = [("success", f"{verb} {task.title}.")]
                     st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Main: sorted and filtered view of the day's tasks
+# ---------------------------------------------------------------------------
+
+with view_tab:
+    st.subheader(f"Tasks for {plan_day:%A %d %B}")
+    st.caption(
+        "Fixed-time tasks in clock order, then flexible tasks in the order they "
+        "were added."
+    )
+
+    pet_filter_col, status_filter_col = st.columns(2)
+    pet_filter = pet_filter_col.selectbox(
+        "Pet", ["All pets"] + [pet.name for pet in owner.pets]
+    )
+    status_filter = status_filter_col.radio(
+        "Status", ["All", "Pending", "Done"], horizontal=True
+    )
+
+    filtered = owner.filter_tasks(
+        pet_name=None if pet_filter == "All pets" else pet_filter,
+        completed={"All": None, "Pending": False, "Done": True}[status_filter],
+        day=plan_day,
+    )
+    ordered = scheduler.sort_by_time(filtered)
+
+    if ordered:
+        st.table(
+            [
+                {
+                    "Time": f"{task.fixed_time:%H:%M}" if task.fixed_time else "flexible",
+                    "Task": task.title,
+                    "Pet": owner.pet_name_for(task) or "—",
+                    "Minutes": task.duration_minutes,
+                    "Priority": task.priority.name.lower(),
+                    "Repeats": task.recurrence.describe(),
+                    "Status": "✅ done" if task.is_done_on(plan_day) else "⏳ pending",
+                }
+                for task in ordered
+            ]
+        )
+        done_count = sum(task.is_done_on(plan_day) for task in ordered)
+        st.caption(f"{len(ordered)} tasks shown · {done_count} done")
+    else:
+        st.info("No tasks match these filters.")
+
+    st.subheader("Time conflicts")
+    conflicts = scheduler.detect_conflicts(
+        owner.all_tasks(), plan_day, owner.pet_name_for
+    )
+    if conflicts:
+        for warning in conflicts:
+            st.warning(f"⚠️ {warning}")
+        st.caption(
+            "The plan keeps the higher-priority or earlier task and lists the other "
+            "under \"Left out\". Change a fixed time to fit both."
+        )
+    else:
+        st.success("No fixed-time tasks overlap on this day.")
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +360,7 @@ with plan_tab:
         available_minutes=int(hours_available * 60),
         min_gap_after_meal=int(meal_gap),
     )
-    plan = Scheduler().build_plan(
+    plan = scheduler.build_plan(
         owner.all_tasks(), constraints, owner.preferred_order, owner.pet_name_for
     )
 
@@ -282,6 +375,17 @@ with plan_tab:
     st.caption(f"Window {window}")
     for warning in plan.warnings:
         st.warning(f"Conflict: {warning}")
+
+    # Completed and off-schedule tasks are expected, not a sign the day ran out.
+    expected = {SkipReason.ALREADY_COMPLETED, SkipReason.NOT_DUE_TODAY}
+    cut = [item for item in plan.deferred if item.reason not in expected]
+    if plan.entries and not cut:
+        st.success(f"All {len(plan.entries)} tasks due today fit in the plan.")
+    elif cut:
+        st.info(
+            f"{len(plan.entries)} tasks scheduled, {len(cut)} left out. "
+            "See \"Left out\" below for the reason."
+        )
 
     rows = plan.to_rows()
     for row, entry in zip(rows, plan.entries):
